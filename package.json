@@ -1,0 +1,24 @@
+{
+  "name": "oas-dsl",
+  "engines": {
+    "node": ">10"
+  },
+  "version": "1.0.0",
+  "description": "Build OpenAPI specs with Typescript",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "/dist"
+  ],
+  "scripts": {
+    "prepublishOnly": "npm run build",
+    "build": "tsc"
+  },
+  "author": "rjbma",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/node": "^18.7.8",
+    "nodemon": "^2.0.19",
+    "typescript": "^4.7.4"
+  }
+}
