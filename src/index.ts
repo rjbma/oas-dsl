@@ -368,17 +368,6 @@ function makeSchema(params: {
 
   return {
     openapi: params.openapiVersion,
-    "x-origin": [
-      {
-        url: "http://localhost:3013/swagger.json",
-        format: "swagger",
-        version: "2.0",
-        converter: {
-          url: "https://github.com/mermade/oas-kit",
-          version: "7.0.8",
-        },
-      },
-    ],
     security:
       params.security && params.security.map((s) => ({ [s.name]: s.scopes })),
     info: params.info,
