@@ -34,6 +34,7 @@ interface Route {
 abstract class Schema {
   protected _description?: string;
   _required?: boolean;
+  _explode?: boolean;
   protected _example?: any;
   protected _label?: string;
 
@@ -187,7 +188,7 @@ class ObjectField extends Schema {
         description,
         name: key,
         in: parameterType,
-        explode: fields[key] instanceof ArrayField ? true : undefined,
+        explode: fields[key]._explode,
         required: parameterType == "path" ? true : fields[key]._required,
         schema,
       };
@@ -216,6 +217,10 @@ class ObjectField extends Schema {
 
 class ArrayField extends Schema {
   _items: Schema | undefined;
+  constructor() {
+    super();
+    this._explode = true;
+  }
   items(d: Schema) {
     const that = clone(this);
     that._items = d;
