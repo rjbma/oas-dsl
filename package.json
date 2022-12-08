@@ -3,7 +3,7 @@
   "engines": {
     "node": ">10"
   },
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Build OpenAPI specs with Typescript",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -18,7 +18,11 @@
   "license": "ISC",
   "devDependencies": {
     "@types/node": "^18.7.8",
+    "@types/prettier": "^2.7.1",
     "nodemon": "^2.0.19",
     "typescript": "^4.7.4"
+  },
+  "dependencies": {
+    "prettier": "^2.8.1"
   }
 }

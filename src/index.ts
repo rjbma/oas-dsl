@@ -1,3 +1,5 @@
+import prettier from "prettier";
+
 type JsonSchema = Record<string, unknown>;
 type SecurityRequirement = { name: string; scopes: string[] };
 
@@ -366,7 +368,7 @@ function makeSchema(params: {
     return acc;
   }, {} as Record<string, Record<string, unknown>>);
 
-  return {
+  const schema = {
     openapi: params.openapiVersion,
     security:
       params.security && params.security.map((s) => ({ [s.name]: s.scopes })),
@@ -376,6 +378,8 @@ function makeSchema(params: {
     servers: params.servers,
     components: { securitySchemes: params.securitySchemes, schemas: {} },
   };
+
+  return prettify(JSON.stringify(schema));
 }
 
 const ignoreUndefined = (filters: Record<string, any>) =>
@@ -389,5 +393,7 @@ function clone<T>(t: T) {
   const r = Object.create(Object.getPrototypeOf(t)) as any;
   return Object.assign(r, t) as T;
 }
+
+const prettify = (data: string) => prettier.format(data, { parser: "json" });
 
 export { oas, Route, Schema };
