@@ -36,16 +36,18 @@ abstract class Schema {
   _required?: boolean;
   _explode?: boolean;
   protected _example?: any;
-  protected _label?: string;
-
-  description(d: string) {
-    const that = clone(this);
-    that._description = d;
-    return that;
-  }
+  abstract toJSonSchema(): JsonSchema;
   required() {
     const that = clone(this);
     that._required = true;
+    return that;
+  }
+}
+
+abstract class ExtensibleSchema extends Schema {
+  description(d: string) {
+    const that = clone(this);
+    that._description = d;
     return that;
   }
   example(d: any) {
@@ -54,9 +56,12 @@ abstract class Schema {
     return that;
   }
   label(d: string) {
-    const that = clone(this);
-    that._label = d;
-    return that;
+    const that = new FixedSchema(this, d);
+    if (this._required) {
+      return that.required();
+    } else {
+      return that;
+    }
   }
   toJSonSchema(): JsonSchema {
     const { type, format, ...ownFields } = this.ownFields();
@@ -76,7 +81,21 @@ abstract class Schema {
   abstract ownFields(): { type: string } & Record<string, any>;
 }
 
-class StringField extends Schema {
+class FixedSchema extends Schema {
+  protected _schema: Schema;
+  protected _label?: string;
+
+  constructor(schema: Schema, label: string) {
+    super();
+    this._schema = schema;
+    this._label = label;
+  }
+  toJSonSchema(): JsonSchema {
+    return this._schema.toJSonSchema();
+  }
+}
+
+class StringField extends ExtensibleSchema {
   _minLength?: number;
   _maxLength?: number;
   _regex?: RegExp;
@@ -106,7 +125,7 @@ class StringField extends Schema {
   }
 }
 
-class BooleanField extends Schema {
+class BooleanField extends ExtensibleSchema {
   ownFields() {
     return {
       type: "boolean",
@@ -114,7 +133,7 @@ class BooleanField extends Schema {
   }
 }
 
-class DateField extends Schema {
+class DateField extends ExtensibleSchema {
   _format: string | undefined;
   iso() {
     const that = clone(this);
@@ -129,7 +148,7 @@ class DateField extends Schema {
   }
 }
 
-class NumberField extends Schema {
+class NumberField extends ExtensibleSchema {
   _min?: number;
   _max?: number;
   _default?: number;
@@ -158,7 +177,7 @@ class NumberField extends Schema {
   }
 }
 
-class EnumField extends Schema {
+class EnumField extends ExtensibleSchema {
   _enum: string[];
   constructor(...values: string[]) {
     super();
@@ -172,7 +191,7 @@ class EnumField extends Schema {
   }
 }
 
-class ObjectField extends Schema {
+class ObjectField extends ExtensibleSchema {
   _fields: Record<string, Schema>;
 
   constructor(fields?: Record<string, Schema>) {
@@ -215,7 +234,7 @@ class ObjectField extends Schema {
   }
 }
 
-class ArrayField extends Schema {
+class ArrayField extends ExtensibleSchema {
   _items: Schema | undefined;
   constructor() {
     super();

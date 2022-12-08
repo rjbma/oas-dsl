@@ -11,6 +11,7 @@
     "/dist"
   ],
   "scripts": {
+    "dev": "tsc --watch",
     "prepublishOnly": "npm run build",
     "build": "tsc"
   },
