@@ -374,7 +374,7 @@ function makeSchema(params: {
     tags: params.tags,
     paths,
     servers: params.servers,
-    components: { securitySchemes: params.securitySchemes },
+    components: { securitySchemes: params.securitySchemes, schemas: {} },
   };
 }
 
