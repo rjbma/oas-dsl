@@ -202,7 +202,9 @@ class ObjectField extends ExtensibleSchema {
   asParameterList(parameterType: "path" | "query" | "header" | "cookie") {
     const fields = this._fields;
     return Object.keys(fields).map((key) => {
-      const { description, required, ...schema } = fields[key].toJSonSchema();
+      // don't include `example` in parameters, to avoid swagger-ui to fill them when trying out the API
+      const { description, example, required, ...schema } =
+        fields[key].toJSonSchema();
       return {
         description,
         name: key,
