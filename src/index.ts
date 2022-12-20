@@ -1,4 +1,8 @@
+import fs from "fs/promises";
+import os from "os";
+import path from "path";
 import prettier from "prettier";
+import $RefParser from "@apidevtools/json-schema-ref-parser";
 
 type JsonSchema = Record<string, unknown>;
 type SecurityRequirement = { name: string; scopes: string[] };
@@ -6,10 +10,20 @@ type SecurityRequirement = { name: string; scopes: string[] };
 interface RouteResponse<S> {
   statusCode: S;
   description: string;
-  schema: Schema;
+  schema?: Schema;
 }
 
-interface Route {
+type Route = DefinedRoute | ReferencedRoute;
+interface ReferencedRoute {
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+  path: string;
+  order?: number;
+  ref: {
+    file: string | URL;
+    path: string;
+  };
+}
+interface DefinedRoute {
   operationId: string;
   description: string;
   notes?: string;
@@ -23,9 +37,9 @@ interface Route {
     headers?: ObjectField;
   };
   // fell free to add more success status codes if needed
-  successResponse: RouteResponse<200 | 201 | 204>;
+  successResponse: RouteResponse<number>;
   // fell free to add more error status codes if needed
-  errorResponses?: Array<RouteResponse<400 | 401 | 403 | 404 | 500>>;
+  errorResponses?: Array<RouteResponse<number>>;
   produces?: string;
   security?: Array<SecurityRequirement>;
   order?: number;
@@ -57,11 +71,7 @@ abstract class ExtensibleSchema extends Schema {
   }
   label(d: string) {
     const that = new FixedSchema(this, d);
-    if (this._required) {
-      return that.required();
-    } else {
-      return that;
-    }
+    return that;
   }
   toJSonSchema(): JsonSchema {
     const { type, format, ...ownFields } = this.ownFields();
@@ -89,9 +99,28 @@ class FixedSchema extends Schema {
     super();
     this._schema = schema;
     this._label = label;
+    this._required = schema._required;
+    this._explode = schema._explode;
   }
   toJSonSchema(): JsonSchema {
     return this._schema.toJSonSchema();
+  }
+}
+
+class ReferenceSchema extends Schema {
+  protected _file: URL | string;
+  protected _path: string;
+  constructor(file: URL | string, path: string) {
+    super();
+    this._file = file;
+    this._path = path;
+  }
+  toJSonSchema(): JsonSchema {
+    const filename =
+      this._file instanceof URL ? this._file.toString() : this._file;
+    return {
+      $ref: `${filename}#${this._path}`,
+    };
   }
 }
 
@@ -218,19 +247,23 @@ class ObjectField extends ExtensibleSchema {
 
   ownFields() {
     const fields = this._fields;
-    const requiredFields = Object.keys(fields).filter((key) => {
+    const fieldNames = Object.keys(fields);
+    const requiredFields = fieldNames.filter((key) => {
       return fields[key]._required;
     });
     return {
       type: "object",
       description: this._description,
-      properties: Object.keys(fields).reduce(
-        (acc, key) => ({
-          ...acc,
-          [key]: fields[key].toJSonSchema(),
-        }),
-        {}
-      ),
+      properties:
+        fieldNames.length == 0
+          ? undefined
+          : fieldNames.reduce(
+              (acc, key) => ({
+                ...acc,
+                [key]: fields[key].toJSonSchema(),
+              }),
+              {}
+            ),
       required: requiredFields.length ? requiredFields : undefined,
     };
   }
@@ -263,61 +296,80 @@ const oas = {
   allow: (...values: string[]) => new EnumField(...values),
   object: (fields?: Record<string, Schema>) => new ObjectField(fields),
   array: () => new ArrayField(),
+  ref: (params: { file: URL | string; path: string }) =>
+    new ReferenceSchema(params.file, params.path),
   makeSchema,
 };
 
 const routeToJsonSchema = (route: Route): JsonSchema => {
-  const errorResponses = route.errorResponses?.reduce((acc, response) => ({
-    ...acc,
-    [response.statusCode]: toResponseSchema(response),
-  }));
+  if ("operationId" in route) {
+    const errorResponses = route.errorResponses?.reduce((acc, response) => ({
+      ...acc,
+      [response.statusCode]: toResponseSchema(response),
+    }));
 
-  const pathAsTag = /\/([^\/]+)/.exec(route.path)?.[1];
-  const parameters = [
-    ...(route.validate?.path?.asParameterList("path") || []),
-    ...(route.validate?.query?.asParameterList("query") || []),
-    ...(route.validate?.headers?.asParameterList("header") || []),
-  ];
-  return ignoreUndefined({
-    summary: route.description,
-    operationId: route.operationId,
-    parameters: parameters.length ? parameters : undefined,
-    requestBody: route.validate?.body && {
-      content: {
-        "application/json": {
-          schema: route.validate.body.toJSonSchema(),
+    const pathAsTag = /\/([^\/]+)/.exec(route.path)?.[1];
+    const parameters = [
+      ...(route.validate?.headers?.asParameterList("header") || []),
+      ...(route.validate?.path?.asParameterList("path") || []),
+      ...(route.validate?.query?.asParameterList("query") || []),
+    ];
+    return ignoreUndefined({
+      summary: route.description,
+      operationId: route.operationId,
+      description: route.notes,
+      parameters: parameters.length ? parameters : undefined,
+      requestBody: route.validate?.body && {
+        content: {
+          "application/json": {
+            schema: route.validate.body.toJSonSchema(),
+          },
         },
       },
-    },
-    tags: route.tags || (pathAsTag ? [pathAsTag] : undefined),
-    responses: {
-      [route.successResponse.statusCode]: toResponseSchema(
-        route.successResponse
-      ),
-      ...(route.errorResponses || []).reduce(
-        (acc, response) => ({
-          ...acc,
-          [response.statusCode]: toResponseSchema(response),
-        }),
-        {}
-      ),
-    },
-    "x-order": route.order,
-  });
+      tags: route.tags || (pathAsTag ? [pathAsTag] : undefined),
+      responses: {
+        [route.successResponse.statusCode]: toResponseSchema(
+          route.successResponse
+        ),
+        ...(route.errorResponses || []).reduce(
+          (acc, response) => ({
+            ...acc,
+            [response.statusCode]: toResponseSchema(response),
+          }),
+          {}
+        ),
+      },
+      "x-order": route.order,
+    });
+  } else {
+    const filename =
+      route.ref.file instanceof URL
+        ? route.ref.file.toString()
+        : route.ref.file;
+    return {
+      $ref: `${filename}#${route.ref.path}`,
+    };
+  }
 };
 
 function toResponseSchema(response: RouteResponse<any>) {
-  return {
-    description: response.description,
-    content: {
-      "application/json": {
-        schema: response.schema.toJSonSchema(),
+  if (response.schema) {
+    return {
+      description: response.description,
+      content: {
+        "application/json": {
+          schema: response.schema.toJSonSchema(),
+        },
       },
-    },
-  };
+    };
+  } else {
+    return {
+      description: response.description,
+    };
+  }
 }
 
-function makeSchema(params: {
+async function makeSchema(params: {
   openapiVersion: "3.0.0";
   info: { title: string; description?: string; version: string };
   servers: [
@@ -377,6 +429,10 @@ function makeSchema(params: {
             };
       }
   >;
+  output:
+    | { type: "stdout" }
+    | { type: "file"; filename: string }
+    | { type: "none" };
 }) {
   const sortedRoutes = [...params.routes];
   sortedRoutes.sort(
@@ -396,8 +452,9 @@ function makeSchema(params: {
 
   const schema = {
     openapi: params.openapiVersion,
-    security:
-      params.security && params.security.map((s) => ({ [s.name]: s.scopes })),
+    security: params.security && [
+      params.security.reduce((acc, s) => ({ ...acc, [s.name]: s.scopes }), {}),
+    ],
     info: params.info,
     tags: params.tags,
     paths,
@@ -405,8 +462,37 @@ function makeSchema(params: {
     components: { securitySchemes: params.securitySchemes, schemas: {} },
   };
 
-  return prettify(JSON.stringify(schema));
+  return withTempFile(async (filename) => {
+    // dereference schema to put everything in one big schema
+    await fs.writeFile(filename, JSON.stringify(schema));
+    const dereferencedSchema = await $RefParser.dereference(filename, {
+      continueOnError: false,
+      parse: {
+        json: true,
+      },
+    });
+
+    // prettify, export to output and return
+    const finalSchema = prettify(JSON.stringify(dereferencedSchema));
+    if (params.output.type == "stdout") {
+      console.log(finalSchema);
+    } else if (params.output.type == "file") {
+      await fs.writeFile(params.output.filename, finalSchema);
+    }
+    return finalSchema;
+  });
 }
+
+const withTempFile = async <T>(fn: (filename: string) => Promise<T>) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "oas-dsl"));
+  try {
+    const filename = path.join(dir, "schema.json");
+    return await fn(filename);
+  } finally {
+    // delete temp file, ignoring errors that may occur
+    fs.rm(dir, { recursive: true }).catch((err) => null);
+  }
+};
 
 const ignoreUndefined = (filters: Record<string, any>) =>
   Object.keys(filters).reduce(
