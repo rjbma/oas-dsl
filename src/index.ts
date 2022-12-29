@@ -7,6 +7,14 @@ import crypto from "crypto";
 
 type JsonSchema = Record<string, unknown>;
 type SecurityRequirement = { name: string; scopes: string[] };
+type Options = {
+  /**
+   * Determines the type of schema to produce:
+   * - `flat` schemas don't contain any `$ref` pointers; they're easier to read by some tools but are also bigger
+   * - `referenced` schemas define schemas in the `components` section, and can be significantly smaller
+   */
+  type: "flat" | "referenced";
+};
 
 interface RouteResponse<S> {
   statusCode: S;
@@ -51,7 +59,7 @@ abstract class Schema {
   _required?: boolean;
   _explode?: boolean;
   protected _example?: any;
-  abstract toJSonSchema(): JsonSchema;
+  abstract toJSonSchema(options: Options): JsonSchema;
   required() {
     const that = clone(this);
     that._required = true;
@@ -74,8 +82,8 @@ abstract class ExtensibleSchema extends Schema {
     const that = new FixedSchema(this, d);
     return that;
   }
-  toJSonSchema(): JsonSchema {
-    const { type, format, ...ownFields } = this.ownFields();
+  toJSonSchema(options: Options): JsonSchema {
+    const { type, format, ...ownFields } = this.ownFields(options);
     return ignoreUndefined({
       type,
       format,
@@ -89,7 +97,7 @@ abstract class ExtensibleSchema extends Schema {
       example: this._example,
     };
   }
-  abstract ownFields(): { type: string } & Record<string, any>;
+  abstract ownFields(options: Options): { type: string } & Record<string, any>;
 }
 
 /**
@@ -101,6 +109,7 @@ abstract class ExtensibleSchema extends Schema {
 class FixedSchema extends Schema {
   protected _schema: Schema;
   protected _label: string;
+  private static registeredFixedSchemas: string[] = [];
 
   constructor(schema: Schema, label: string) {
     super();
@@ -108,17 +117,38 @@ class FixedSchema extends Schema {
     this._label = toSchemaName(label);
     this._required = schema._required;
     this._explode = schema._explode;
+    FixedSchema.registeredFixedSchemas.push(this._label);
   }
-  toJSonSchema(): JsonSchema {
-    return {
-      $ref: `#/components/schemas/${this._label}`,
-    };
+  toJSonSchema(options: Options): JsonSchema {
+    if (options.type == "flat") {
+      return this._schema.toJSonSchema(options);
+    } else {
+      return {
+        $ref: `#/components/schemas/${this._label}`,
+      };
+    }
   }
-  toComponent() {
-    return { [toSchemaName(this._label)]: this._schema.toJSonSchema() };
+  toComponent(options: Options) {
+    return { [toSchemaName(this._label)]: this._schema.toJSonSchema(options) };
   }
   getReferencedSchema() {
     return this._schema;
+  }
+  /**
+   * Get a list of FixedSchemas that have been defined more than once.
+   *
+   * This is invalid for "referenced" schemas, where each FixedSchema
+   * is defined in the `components` section, and thus must be unique
+   */
+  static getDuplicateFixedSchemas() {
+    const schemaCount = FixedSchema.registeredFixedSchemas.reduce(
+      (acc, s) => ({
+        ...acc,
+        [s]: (acc[s] || 0) + 1,
+      }),
+      {} as Record<string, number>
+    );
+    return Object.keys(schemaCount).filter((s) => schemaCount[s] > 1);
   }
 }
 
@@ -289,12 +319,15 @@ class ObjectField extends ExtensibleSchema {
     this._fields = fields || {};
   }
 
-  asParameterList(parameterType: "path" | "query" | "header" | "cookie") {
+  asParameterList(
+    parameterType: "path" | "query" | "header" | "cookie",
+    options: Options
+  ) {
     const fields = this._fields;
     return Object.keys(fields).map((key) => {
       // don't include `example` in parameters, to avoid swagger-ui to fill them when trying out the API
       const { description, example, required, ...schema } =
-        fields[key].toJSonSchema();
+        fields[key].toJSonSchema(options);
       return {
         description,
         name: key,
@@ -306,7 +339,7 @@ class ObjectField extends ExtensibleSchema {
     });
   }
 
-  ownFields() {
+  ownFields(options: Options) {
     const fields = this._fields;
     const fieldNames = Object.keys(fields);
     const requiredFields = fieldNames.filter((key) => {
@@ -321,7 +354,7 @@ class ObjectField extends ExtensibleSchema {
           : fieldNames.reduce(
               (acc, key) => ({
                 ...acc,
-                [key]: fields[key].toJSonSchema(),
+                [key]: fields[key].toJSonSchema(options),
               }),
               {}
             ),
@@ -341,10 +374,10 @@ class ArrayField extends ExtensibleSchema {
     that._items = d;
     return that;
   }
-  ownFields() {
+  ownFields(options: Options) {
     return {
       type: "array",
-      items: this._items?.toJSonSchema(),
+      items: this._items?.toJSonSchema(options),
     };
   }
 }
@@ -362,18 +395,18 @@ const oas = {
   makeSchema,
 };
 
-const routeToJsonSchema = (route: Route): JsonSchema => {
+const routeToJsonSchema = (route: Route, options: Options): JsonSchema => {
   if ("operationId" in route) {
     const errorResponses = route.errorResponses?.reduce((acc, response) => ({
       ...acc,
-      [response.statusCode]: toResponseSchema(response),
+      [response.statusCode]: toResponseSchema(response, options),
     }));
 
     const pathAsTag = /\/([^\/]+)/.exec(route.path)?.[1];
     const parameters = [
-      ...(route.validate?.headers?.asParameterList("header") || []),
-      ...(route.validate?.path?.asParameterList("path") || []),
-      ...(route.validate?.query?.asParameterList("query") || []),
+      ...(route.validate?.headers?.asParameterList("header", options) || []),
+      ...(route.validate?.path?.asParameterList("path", options) || []),
+      ...(route.validate?.query?.asParameterList("query", options) || []),
     ];
     return ignoreUndefined({
       summary: route.description,
@@ -383,19 +416,20 @@ const routeToJsonSchema = (route: Route): JsonSchema => {
       requestBody: route.validate?.body && {
         content: {
           "application/json": {
-            schema: route.validate.body.toJSonSchema(),
+            schema: route.validate.body.toJSonSchema(options),
           },
         },
       },
       tags: route.tags || (pathAsTag ? [pathAsTag] : undefined),
       responses: {
         [route.successResponse.statusCode]: toResponseSchema(
-          route.successResponse
+          route.successResponse,
+          options
         ),
         ...(route.errorResponses || []).reduce(
           (acc, response) => ({
             ...acc,
-            [response.statusCode]: toResponseSchema(response),
+            [response.statusCode]: toResponseSchema(response, options),
           }),
           {}
         ),
@@ -413,13 +447,13 @@ const routeToJsonSchema = (route: Route): JsonSchema => {
   }
 };
 
-function toResponseSchema(response: RouteResponse<any>) {
+function toResponseSchema(response: RouteResponse<any>, options: Options) {
   if (response.schema) {
     return {
       description: response.description,
       content: {
         "application/json": {
-          schema: response.schema.toJSonSchema(),
+          schema: response.schema.toJSonSchema(options),
         },
       },
     };
@@ -430,72 +464,83 @@ function toResponseSchema(response: RouteResponse<any>) {
   }
 }
 
-async function makeSchema(params: {
-  openapiVersion: "3.0.0";
-  info: { title: string; description?: string; version: string };
-  servers: [
-    {
-      url: string;
-      description?: string;
-      variables?: Record<
-        string,
-        { default: string; description?: string; enum?: string[] }
-      >;
-    }
-  ];
-  tags: string[];
-  routes: Route[];
-  security?: Array<SecurityRequirement>;
-  securitySchemes?: Record<
-    string,
-    | {
-        type: "apiKey" | "http" | "oauth2" | "openIdConnect";
+async function makeSchema(
+  params: {
+    openapiVersion: "3.0.0";
+    info: { title: string; description?: string; version: string };
+    servers: [
+      {
+        url: string;
         description?: string;
-        name?: string;
-        in?: "query" | "header" | "cookie";
+        variables?: Record<
+          string,
+          { default: string; description?: string; enum?: string[] }
+        >;
       }
-    | {
-        type: "oauth2";
-        description?: string;
-        name?: string;
-        in?: "query" | "header" | "cookie";
-        flows:
-          | {
-              implicit: {
-                authorizationUrl: string;
-                refreshUrl?: string;
-                scopes: Record<string, string>;
+    ];
+    tags: string[];
+    routes: Route[];
+    security?: Array<SecurityRequirement>;
+    securitySchemes?: Record<
+      string,
+      | {
+          type: "apiKey" | "http" | "oauth2" | "openIdConnect";
+          description?: string;
+          name?: string;
+          in?: "query" | "header" | "cookie";
+        }
+      | {
+          type: "oauth2";
+          description?: string;
+          name?: string;
+          in?: "query" | "header" | "cookie";
+          flows:
+            | {
+                implicit: {
+                  authorizationUrl: string;
+                  refreshUrl?: string;
+                  scopes: Record<string, string>;
+                };
+              }
+            | {
+                password: {
+                  tokenUrl: string;
+                  refreshUrl?: string;
+                  scopes: Record<string, string>;
+                };
+              }
+            | {
+                clientCredentials: {
+                  tokenUrl: "https://authserver.example/token";
+                  scopes: Record<string, string>;
+                };
+              }
+            | {
+                authorizationCode: {
+                  authorizationUrl: string;
+                  tokenUrl: string;
+                  refreshUrl?: string;
+                  scopes: Record<string, string>;
+                };
               };
-            }
-          | {
-              password: {
-                tokenUrl: string;
-                refreshUrl?: string;
-                scopes: Record<string, string>;
-              };
-            }
-          | {
-              clientCredentials: {
-                tokenUrl: "https://authserver.example/token";
-                scopes: Record<string, string>;
-              };
-            }
-          | {
-              authorizationCode: {
-                authorizationUrl: string;
-                tokenUrl: string;
-                refreshUrl?: string;
-                scopes: Record<string, string>;
-              };
-            };
-      }
-  >;
-  output:
-    | { type: "stdout" }
-    | { type: "file"; filename: string }
-    | { type: "none" };
-}) {
+        }
+    >;
+    output:
+      | { type: "stdout" }
+      | { type: "file"; filename: string }
+      | { type: "none" };
+  },
+  options: Options
+) {
   return withTempDir(async (tempDir) => {
+    // make sure there aren't any duplicate FixedSchemas
+    if (options.type == "referenced") {
+      const duplicates = FixedSchema.getDuplicateFixedSchemas();
+      if (duplicates.length) {
+        throw new Error(`Found duplicate fixed schemas: ${duplicates}`);
+      }
+    }
+
     await ReferenceSchema.dereferenceExternalSchemas(tempDir);
 
     const sortedRoutes = [...params.routes];
@@ -510,7 +555,7 @@ async function makeSchema(params: {
       if (!path) {
         path = acc[route.path] = {} as Record<string, unknown>;
       }
-      path[route.method.toLowerCase()] = routeToJsonSchema(route);
+      path[route.method.toLowerCase()] = routeToJsonSchema(route, options);
       return acc;
     }, {} as Record<string, Record<string, unknown>>);
 
@@ -528,15 +573,19 @@ async function makeSchema(params: {
       servers: params.servers,
       components: {
         securitySchemes: params.securitySchemes,
-        schemas: toSchemaObject(
-          params.routes.flatMap(collectRefSchemasForRoute)
-        ),
+        schemas:
+          options.type == "referenced"
+            ? toSchemaObject(
+                params.routes.flatMap(collectRefSchemasForRoute),
+                options
+              )
+            : {},
       },
     };
 
     // dereference schema to put everything in one big schema
-    const finalSchema = await normalizeSchema({
-      type: "bundle",
+    let finalSchema = await normalizeSchema({
+      type: options.type == "flat" ? "dereference" : "bundle",
       source: {
         type: "schema",
         schema,
@@ -586,11 +635,14 @@ function collectRefSchemasForRoute(route: Route): FixedSchema[] {
   }
 }
 
-function toSchemaObject(schemas: FixedSchema[]): Record<string, FixedSchema> {
+function toSchemaObject(
+  schemas: FixedSchema[],
+  options: Options
+): Record<string, FixedSchema> {
   return schemas.reduce(
     (acc, schema) => ({
       ...acc,
-      ...schema.toComponent(),
+      ...schema.toComponent(options),
     }),
     {}
   );
@@ -664,7 +716,7 @@ const normalizeSchema = async (params: {
 
 /**Generate a random filename */
 const randomFilename = (params: { dir?: string; prefix: string }) => {
-  const filename = `prefix-${crypto.randomBytes(3).toString("hex")}`;
+  const filename = `${params.prefix}-${crypto.randomBytes(3).toString("hex")}`;
   return params.dir ? path.join(params.dir, filename) : filename;
 };
 
