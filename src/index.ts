@@ -3,6 +3,7 @@ import os from "os";
 import path from "path";
 import prettier from "prettier";
 import $RefParser from "@apidevtools/json-schema-ref-parser";
+import crypto from "crypto";
 
 type JsonSchema = Record<string, unknown>;
 type SecurityRequirement = { name: string; scopes: string[] };
@@ -91,36 +92,96 @@ abstract class ExtensibleSchema extends Schema {
   abstract ownFields(): { type: string } & Record<string, any>;
 }
 
+/**
+ * A schema that cannot be modified (e.g., no more fields can be added to it).
+ *
+ * This kind of schema is identified by a unique label, and is defined under the
+ * `components/schemas` section of the spec.
+ */
 class FixedSchema extends Schema {
   protected _schema: Schema;
-  protected _label?: string;
+  protected _label: string;
 
   constructor(schema: Schema, label: string) {
     super();
     this._schema = schema;
-    this._label = label;
+    this._label = toSchemaName(label);
     this._required = schema._required;
     this._explode = schema._explode;
   }
   toJSonSchema(): JsonSchema {
-    return this._schema.toJSonSchema();
+    return {
+      $ref: `#/components/schemas/${this._label}`,
+    };
+  }
+  toComponent() {
+    return { [toSchemaName(this._label)]: this._schema.toJSonSchema() };
+  }
+  getReferencedSchema() {
+    return this._schema;
   }
 }
 
+/**
+ * A schema that is a reference to another schema defined in an external file.
+ */
 class ReferenceSchema extends Schema {
   protected _file: URL | string;
   protected _path: string;
+  private static externalFiles: Record<string, string> = {};
+
   constructor(file: URL | string, path: string) {
     super();
     this._file = file;
     this._path = path;
+    ReferenceSchema.externalFiles[this._file.toString()] = "";
   }
+
+  /**
+   * Go through all the referenced schemas known up until this point, get their
+   * external files, dereference those schemas (i.e., eliminate all `$ref` pointers),
+   * and create new schema files in a temp directory.
+   *
+   * This should be done *after* the schema is fully defined, so that this can be done
+   * for all possible references.
+   */
+  static async dereferenceExternalSchemas(tempDir: string): Promise<void> {
+    await Promise.all(
+      Object.keys(ReferenceSchema.externalFiles).map(
+        async (externalFilePath, i) => {
+          const targetFilename = path.join(
+            tempDir,
+            `spec-${i}-${getFilename(externalFilePath)}`
+          );
+          await normalizeSchema({
+            tempDir,
+            type: "dereference",
+            source: {
+              type: "file",
+              filename: externalFilePath,
+            },
+            target: {
+              type: "file",
+              filename: targetFilename,
+            },
+          });
+
+          ReferenceSchema.externalFiles[externalFilePath] = targetFilename;
+        }
+      )
+    );
+  }
+
   toJSonSchema(): JsonSchema {
-    const filename =
-      this._file instanceof URL ? this._file.toString() : this._file;
-    return {
-      $ref: `${filename}#${this._path}`,
-    };
+    const sourceFilename = this._file.toString();
+    const targetFilename = ReferenceSchema.externalFiles[sourceFilename];
+    if (targetFilename) {
+      return {
+        $ref: `${targetFilename}#${this._path}`,
+      };
+    } else {
+      throw new Error("External file not found: " + sourceFilename);
+    }
   }
 }
 
@@ -434,60 +495,111 @@ async function makeSchema(params: {
     | { type: "file"; filename: string }
     | { type: "none" };
 }) {
-  const sortedRoutes = [...params.routes];
-  sortedRoutes.sort(
-    (a, b) =>
-      (a.order == undefined ? 10000 : a.order) -
-      (b.order == undefined ? 10000 : b.order)
-  );
+  return withTempDir(async (tempDir) => {
+    await ReferenceSchema.dereferenceExternalSchemas(tempDir);
 
-  const paths = sortedRoutes.reduce((acc, route) => {
-    let path = acc[route.path];
-    if (!path) {
-      path = acc[route.path] = {} as Record<string, unknown>;
-    }
-    path[route.method.toLowerCase()] = routeToJsonSchema(route);
-    return acc;
-  }, {} as Record<string, Record<string, unknown>>);
+    const sortedRoutes = [...params.routes];
+    sortedRoutes.sort(
+      (a, b) =>
+        (a.order == undefined ? 10000 : a.order) -
+        (b.order == undefined ? 10000 : b.order)
+    );
 
-  const schema = {
-    openapi: params.openapiVersion,
-    security: params.security && [
-      params.security.reduce((acc, s) => ({ ...acc, [s.name]: s.scopes }), {}),
-    ],
-    info: params.info,
-    tags: params.tags,
-    paths,
-    servers: params.servers,
-    components: { securitySchemes: params.securitySchemes, schemas: {} },
-  };
+    const paths = sortedRoutes.reduce((acc, route) => {
+      let path = acc[route.path];
+      if (!path) {
+        path = acc[route.path] = {} as Record<string, unknown>;
+      }
+      path[route.method.toLowerCase()] = routeToJsonSchema(route);
+      return acc;
+    }, {} as Record<string, Record<string, unknown>>);
 
-  return withTempFile(async (filename) => {
-    // dereference schema to put everything in one big schema
-    await fs.writeFile(filename, JSON.stringify(schema));
-    const dereferencedSchema = await $RefParser.dereference(filename, {
-      continueOnError: false,
-      parse: {
-        json: true,
+    const schema = {
+      openapi: params.openapiVersion,
+      security: params.security && [
+        params.security.reduce(
+          (acc, s) => ({ ...acc, [s.name]: s.scopes }),
+          {}
+        ),
+      ],
+      info: params.info,
+      tags: params.tags,
+      paths,
+      servers: params.servers,
+      components: {
+        securitySchemes: params.securitySchemes,
+        schemas: toSchemaObject(
+          params.routes.flatMap(collectRefSchemasForRoute)
+        ),
       },
+    };
+
+    // dereference schema to put everything in one big schema
+    const finalSchema = await normalizeSchema({
+      type: "bundle",
+      source: {
+        type: "schema",
+        schema,
+      },
+      target:
+        // write to output file, if specified
+        params.output.type == "file"
+          ? { type: "file", filename: params.output.filename }
+          : undefined,
+      tempDir,
     });
 
-    // prettify, export to output and return
-    const finalSchema = prettify(JSON.stringify(dereferencedSchema));
+    // print to console, if specified
     if (params.output.type == "stdout") {
       console.log(finalSchema);
-    } else if (params.output.type == "file") {
-      await fs.writeFile(params.output.filename, finalSchema);
     }
-    return finalSchema;
   });
 }
 
-const withTempFile = async <T>(fn: (filename: string) => Promise<T>) => {
+function collectRefSchemasForSchema(schema: Schema | undefined): FixedSchema[] {
+  if (schema instanceof FixedSchema) {
+    return [schema].concat(
+      collectRefSchemasForSchema(schema.getReferencedSchema())
+    );
+  } else if (schema instanceof ObjectField) {
+    return Object.values(schema._fields).flatMap(collectRefSchemasForSchema);
+  } else if (schema instanceof ArrayField) {
+    return collectRefSchemasForSchema(schema._items);
+  } else {
+    return [];
+  }
+}
+
+function collectRefSchemasForRoute(route: Route): FixedSchema[] {
+  if ("validate" in route) {
+    const schemas: (Schema | undefined)[] = [
+      route.validate?.path,
+      route.validate?.headers,
+      route.validate?.query,
+      route.validate?.body,
+      route.successResponse.schema,
+      ...(route.errorResponses?.map((r) => r.schema) || []),
+    ];
+    return schemas.flatMap(collectRefSchemasForSchema);
+  } else {
+    return [];
+  }
+}
+
+function toSchemaObject(schemas: FixedSchema[]): Record<string, FixedSchema> {
+  return schemas.reduce(
+    (acc, schema) => ({
+      ...acc,
+      ...schema.toComponent(),
+    }),
+    {}
+  );
+}
+
+const withTempDir = async <T>(fn: (tempDir: string) => Promise<T>) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "oas-dsl"));
   try {
-    const filename = path.join(dir, "schema.json");
-    return await fn(filename);
+    return await fn(dir);
   } finally {
     // delete temp file, ignoring errors that may occur
     fs.rm(dir, { recursive: true }).catch((err) => null);
@@ -507,5 +619,53 @@ function clone<T>(t: T) {
 }
 
 const prettify = (data: string) => prettier.format(data, { parser: "json" });
+
+const toSchemaName = (label: string) =>
+  label.replace(/[^A-Za-z0-9\-\._]/gm, "_");
+
+const getFilename = (path: string) => path.substring(path.lastIndexOf("/") + 1);
+
+const normalizeSchema = async (params: {
+  tempDir: string;
+  type: "bundle" | "dereference";
+  source:
+    | {
+        type: "schema";
+        schema: Record<string, unknown>;
+      }
+    | { type: "file"; filename: string };
+  target?: { type: "file"; filename: string };
+}): Promise<string> => {
+  // build a temp file with the source schema, if needed
+  let sourceFilename: string;
+  if (params.source.type == "file") {
+    sourceFilename = params.source.filename;
+  } else {
+    sourceFilename = randomFilename({
+      dir: params.tempDir,
+      prefix: "pre-normalize",
+    });
+    await fs.writeFile(sourceFilename, JSON.stringify(params.source.schema));
+  }
+
+  // normalize the schema
+  const normalizedSchema = await $RefParser[params.type](sourceFilename, {
+    continueOnError: false,
+    parse: { json: true },
+  });
+
+  // prettify, save to target file (if needed) and return the schema
+  const finalSchema = prettify(JSON.stringify(normalizedSchema));
+  if (params.target?.type == "file") {
+    await fs.writeFile(params.target.filename, finalSchema);
+  }
+  return finalSchema;
+};
+
+/**Generate a random filename */
+const randomFilename = (params: { dir?: string; prefix: string }) => {
+  const filename = `prefix-${crypto.randomBytes(3).toString("hex")}`;
+  return params.dir ? path.join(params.dir, filename) : filename;
+};
 
 export { oas, Route, Schema };
