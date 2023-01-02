@@ -325,9 +325,14 @@ class ObjectField extends ExtensibleSchema {
   ) {
     const fields = this._fields;
     return Object.keys(fields).map((key) => {
+      // we don't support FixedScemas being used as parameters; we need to revert to the original schema
+      const fieldSchema =
+        fields[key] instanceof FixedSchema
+          ? (fields[key] as FixedSchema).getReferencedSchema()
+          : fields[key];
       // don't include `example` in parameters, to avoid swagger-ui to fill them when trying out the API
       const { description, example, required, ...schema } =
-        fields[key].toJSonSchema(options);
+        fieldSchema.toJSonSchema(options);
       return {
         description,
         name: key,
