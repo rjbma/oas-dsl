@@ -3,9 +3,18 @@ import os from "os";
 import path from "path";
 import prettier from "prettier";
 import $RefParser from "@apidevtools/json-schema-ref-parser";
+import crypto from "crypto";
 
 type JsonSchema = Record<string, unknown>;
 type SecurityRequirement = { name: string; scopes: string[] };
+type Options = {
+  /**
+   * Determines the type of schema to produce:
+   * - `flat` schemas don't contain any `$ref` pointers; they're easier to read by some tools but are also bigger
+   * - `referenced` schemas define schemas in the `components` section, and can be significantly smaller
+   */
+  type: "flat" | "referenced";
+};
 
 interface RouteResponse<S> {
   statusCode: S;
@@ -50,7 +59,7 @@ abstract class Schema {
   _required?: boolean;
   _explode?: boolean;
   protected _example?: any;
-  abstract toJSonSchema(): JsonSchema;
+  abstract toJSonSchema(options: Options): JsonSchema;
   required() {
     const that = clone(this);
     that._required = true;
@@ -73,8 +82,8 @@ abstract class ExtensibleSchema extends Schema {
     const that = new FixedSchema(this, d);
     return that;
   }
-  toJSonSchema(): JsonSchema {
-    const { type, format, ...ownFields } = this.ownFields();
+  toJSonSchema(options: Options): JsonSchema {
+    const { type, format, ...ownFields } = this.ownFields(options);
     return ignoreUndefined({
       type,
       format,
@@ -88,39 +97,121 @@ abstract class ExtensibleSchema extends Schema {
       example: this._example,
     };
   }
-  abstract ownFields(): { type: string } & Record<string, any>;
+  abstract ownFields(options: Options): { type: string } & Record<string, any>;
 }
 
+/**
+ * A schema that cannot be modified (e.g., no more fields can be added to it).
+ *
+ * This kind of schema is identified by a unique label, and is defined under the
+ * `components/schemas` section of the spec.
+ */
 class FixedSchema extends Schema {
   protected _schema: Schema;
-  protected _label?: string;
+  protected _label: string;
+  private static registeredFixedSchemas: string[] = [];
 
   constructor(schema: Schema, label: string) {
     super();
     this._schema = schema;
-    this._label = label;
+    this._label = toSchemaName(label);
     this._required = schema._required;
     this._explode = schema._explode;
+    FixedSchema.registeredFixedSchemas.push(this._label);
   }
-  toJSonSchema(): JsonSchema {
-    return this._schema.toJSonSchema();
+  toJSonSchema(options: Options): JsonSchema {
+    if (options.type == "flat") {
+      return this._schema.toJSonSchema(options);
+    } else {
+      return {
+        $ref: `#/components/schemas/${this._label}`,
+      };
+    }
+  }
+  toComponent(options: Options) {
+    return { [toSchemaName(this._label)]: this._schema.toJSonSchema(options) };
+  }
+  getReferencedSchema() {
+    return this._schema;
+  }
+  /**
+   * Get a list of FixedSchemas that have been defined more than once.
+   *
+   * This is invalid for "referenced" schemas, where each FixedSchema
+   * is defined in the `components` section, and thus must be unique
+   */
+  static getDuplicateFixedSchemas() {
+    const schemaCount = FixedSchema.registeredFixedSchemas.reduce(
+      (acc, s) => ({
+        ...acc,
+        [s]: (acc[s] || 0) + 1,
+      }),
+      {} as Record<string, number>
+    );
+    return Object.keys(schemaCount).filter((s) => schemaCount[s] > 1);
   }
 }
 
+/**
+ * A schema that is a reference to another schema defined in an external file.
+ */
 class ReferenceSchema extends Schema {
   protected _file: URL | string;
   protected _path: string;
+  private static externalFiles: Record<string, string> = {};
+
   constructor(file: URL | string, path: string) {
     super();
     this._file = file;
     this._path = path;
+    ReferenceSchema.externalFiles[this._file.toString()] = "";
   }
+
+  /**
+   * Go through all the referenced schemas known up until this point, get their
+   * external files, dereference those schemas (i.e., eliminate all `$ref` pointers),
+   * and create new schema files in a temp directory.
+   *
+   * This should be done *after* the schema is fully defined, so that this can be done
+   * for all possible references.
+   */
+  static async dereferenceExternalSchemas(tempDir: string): Promise<void> {
+    await Promise.all(
+      Object.keys(ReferenceSchema.externalFiles).map(
+        async (externalFilePath, i) => {
+          const targetFilename = path.join(
+            tempDir,
+            `spec-${i}-${getFilename(externalFilePath)}`
+          );
+          await normalizeSchema({
+            tempDir,
+            type: "dereference",
+            source: {
+              type: "file",
+              filename: externalFilePath,
+            },
+            target: {
+              type: "file",
+              filename: targetFilename,
+            },
+          });
+
+          ReferenceSchema.externalFiles[externalFilePath] = targetFilename;
+        }
+      )
+    );
+  }
+
   toJSonSchema(): JsonSchema {
-    const filename =
-      this._file instanceof URL ? this._file.toString() : this._file;
-    return {
-      $ref: `${filename}#${this._path}`,
-    };
+    const sourceFilename = this._file.toString();
+    const targetFilename = ReferenceSchema.externalFiles[sourceFilename];
+    if (targetFilename) {
+      return {
+        $ref: `${targetFilename}#${this._path}`,
+      };
+    } else {
+      throw new Error("External file not found: " + sourceFilename);
+    }
   }
 }
 
@@ -228,12 +319,20 @@ class ObjectField extends ExtensibleSchema {
     this._fields = fields || {};
   }
 
-  asParameterList(parameterType: "path" | "query" | "header" | "cookie") {
+  asParameterList(
+    parameterType: "path" | "query" | "header" | "cookie",
+    options: Options
+  ) {
     const fields = this._fields;
     return Object.keys(fields).map((key) => {
+      // we don't support FixedScemas being used as parameters; we need to revert to the original schema
+      const fieldSchema =
+        fields[key] instanceof FixedSchema
+          ? (fields[key] as FixedSchema).getReferencedSchema()
+          : fields[key];
       // don't include `example` in parameters, to avoid swagger-ui to fill them when trying out the API
       const { description, example, required, ...schema } =
-        fields[key].toJSonSchema();
+        fieldSchema.toJSonSchema(options);
       return {
         description,
         name: key,
@@ -245,7 +344,7 @@ class ObjectField extends ExtensibleSchema {
     });
   }
 
-  ownFields() {
+  ownFields(options: Options) {
     const fields = this._fields;
     const fieldNames = Object.keys(fields);
     const requiredFields = fieldNames.filter((key) => {
@@ -260,7 +359,7 @@ class ObjectField extends ExtensibleSchema {
           : fieldNames.reduce(
               (acc, key) => ({
                 ...acc,
-                [key]: fields[key].toJSonSchema(),
+                [key]: fields[key].toJSonSchema(options),
               }),
               {}
             ),
@@ -280,10 +379,10 @@ class ArrayField extends ExtensibleSchema {
     that._items = d;
     return that;
   }
-  ownFields() {
+  ownFields(options: Options) {
     return {
       type: "array",
-      items: this._items?.toJSonSchema(),
+      items: this._items?.toJSonSchema(options),
     };
   }
 }
@@ -301,18 +400,18 @@ const oas = {
   makeSchema,
 };
 
-const routeToJsonSchema = (route: Route): JsonSchema => {
+const routeToJsonSchema = (route: Route, options: Options): JsonSchema => {
   if ("operationId" in route) {
     const errorResponses = route.errorResponses?.reduce((acc, response) => ({
       ...acc,
-      [response.statusCode]: toResponseSchema(response),
+      [response.statusCode]: toResponseSchema(response, options),
     }));
 
     const pathAsTag = /\/([^\/]+)/.exec(route.path)?.[1];
     const parameters = [
-      ...(route.validate?.headers?.asParameterList("header") || []),
-      ...(route.validate?.path?.asParameterList("path") || []),
-      ...(route.validate?.query?.asParameterList("query") || []),
+      ...(route.validate?.headers?.asParameterList("header", options) || []),
+      ...(route.validate?.path?.asParameterList("path", options) || []),
+      ...(route.validate?.query?.asParameterList("query", options) || []),
     ];
     return ignoreUndefined({
       summary: route.description,
@@ -322,19 +421,20 @@ const routeToJsonSchema = (route: Route): JsonSchema => {
       requestBody: route.validate?.body && {
         content: {
           "application/json": {
-            schema: route.validate.body.toJSonSchema(),
+            schema: route.validate.body.toJSonSchema(options),
           },
         },
       },
       tags: route.tags || (pathAsTag ? [pathAsTag] : undefined),
       responses: {
         [route.successResponse.statusCode]: toResponseSchema(
-          route.successResponse
+          route.successResponse,
+          options
         ),
         ...(route.errorResponses || []).reduce(
           (acc, response) => ({
             ...acc,
-            [response.statusCode]: toResponseSchema(response),
+            [response.statusCode]: toResponseSchema(response, options),
           }),
           {}
         ),
@@ -352,13 +452,13 @@ const routeToJsonSchema = (route: Route): JsonSchema => {
   }
 };
 
-function toResponseSchema(response: RouteResponse<any>) {
+function toResponseSchema(response: RouteResponse<any>, options: Options) {
   if (response.schema) {
     return {
       description: response.description,
       content: {
         "application/json": {
-          schema: response.schema.toJSonSchema(),
+          schema: response.schema.toJSonSchema(options),
         },
       },
     };
@@ -369,125 +469,194 @@ function toResponseSchema(response: RouteResponse<any>) {
   }
 }
 
-async function makeSchema(params: {
-  openapiVersion: "3.0.0";
-  info: { title: string; description?: string; version: string };
-  servers: [
-    {
-      url: string;
-      description?: string;
-      variables?: Record<
-        string,
-        { default: string; description?: string; enum?: string[] }
-      >;
-    }
-  ];
-  tags: string[];
-  routes: Route[];
-  security?: Array<SecurityRequirement>;
-  securitySchemes?: Record<
-    string,
-    | {
-        type: "apiKey" | "http" | "oauth2" | "openIdConnect";
+async function makeSchema(
+  params: {
+    openapiVersion: "3.0.0";
+    info: { title: string; description?: string; version: string };
+    servers: [
+      {
+        url: string;
         description?: string;
-        name?: string;
-        in?: "query" | "header" | "cookie";
+        variables?: Record<
+          string,
+          { default: string; description?: string; enum?: string[] }
+        >;
       }
-    | {
-        type: "oauth2";
-        description?: string;
-        name?: string;
-        in?: "query" | "header" | "cookie";
-        flows:
-          | {
-              implicit: {
-                authorizationUrl: string;
-                refreshUrl?: string;
-                scopes: Record<string, string>;
+    ];
+    tags: string[];
+    routes: Route[];
+    security?: Array<SecurityRequirement>;
+    securitySchemes?: Record<
+      string,
+      | {
+          type: "apiKey" | "http" | "oauth2" | "openIdConnect";
+          description?: string;
+          name?: string;
+          in?: "query" | "header" | "cookie";
+        }
+      | {
+          type: "oauth2";
+          description?: string;
+          name?: string;
+          in?: "query" | "header" | "cookie";
+          flows:
+            | {
+                implicit: {
+                  authorizationUrl: string;
+                  refreshUrl?: string;
+                  scopes: Record<string, string>;
+                };
+              }
+            | {
+                password: {
+                  tokenUrl: string;
+                  refreshUrl?: string;
+                  scopes: Record<string, string>;
+                };
+              }
+            | {
+                clientCredentials: {
+                  tokenUrl: "https://authserver.example/token";
+                  scopes: Record<string, string>;
+                };
+              }
+            | {
+                authorizationCode: {
+                  authorizationUrl: string;
+                  tokenUrl: string;
+                  refreshUrl?: string;
+                  scopes: Record<string, string>;
+                };
               };
-            }
-          | {
-              password: {
-                tokenUrl: string;
-                refreshUrl?: string;
-                scopes: Record<string, string>;
-              };
-            }
-          | {
-              clientCredentials: {
-                tokenUrl: "https://authserver.example/token";
-                scopes: Record<string, string>;
-              };
-            }
-          | {
-              authorizationCode: {
-                authorizationUrl: string;
-                tokenUrl: string;
-                refreshUrl?: string;
-                scopes: Record<string, string>;
-              };
-            };
+        }
+    >;
+    output:
+      | { type: "stdout" }
+      | { type: "file"; filename: string }
+      | { type: "none" };
+  },
+  options: Options
+) {
+  return withTempDir(async (tempDir) => {
+    // make sure there aren't any duplicate FixedSchemas
+    if (options.type == "referenced") {
+      const duplicates = FixedSchema.getDuplicateFixedSchemas();
+      if (duplicates.length) {
+        throw new Error(`Found duplicate fixed schemas: ${duplicates}`);
       }
-  >;
-  output:
-    | { type: "stdout" }
-    | { type: "file"; filename: string }
-    | { type: "none" };
-}) {
-  const sortedRoutes = [...params.routes];
-  sortedRoutes.sort(
-    (a, b) =>
-      (a.order == undefined ? 10000 : a.order) -
-      (b.order == undefined ? 10000 : b.order)
-  );
-
-  const paths = sortedRoutes.reduce((acc, route) => {
-    let path = acc[route.path];
-    if (!path) {
-      path = acc[route.path] = {} as Record<string, unknown>;
     }
-    path[route.method.toLowerCase()] = routeToJsonSchema(route);
-    return acc;
-  }, {} as Record<string, Record<string, unknown>>);
 
-  const schema = {
-    openapi: params.openapiVersion,
-    security: params.security && [
-      params.security.reduce((acc, s) => ({ ...acc, [s.name]: s.scopes }), {}),
-    ],
-    info: params.info,
-    tags: params.tags,
-    paths,
-    servers: params.servers,
-    components: { securitySchemes: params.securitySchemes, schemas: {} },
-  };
+    await ReferenceSchema.dereferenceExternalSchemas(tempDir);
 
-  return withTempFile(async (filename) => {
-    // dereference schema to put everything in one big schema
-    await fs.writeFile(filename, JSON.stringify(schema));
-    const dereferencedSchema = await $RefParser.dereference(filename, {
-      continueOnError: false,
-      parse: {
-        json: true,
+    const sortedRoutes = [...params.routes];
+    sortedRoutes.sort(
+      (a, b) =>
+        (a.order == undefined ? 10000 : a.order) -
+        (b.order == undefined ? 10000 : b.order)
+    );
+
+    const paths = sortedRoutes.reduce((acc, route) => {
+      let path = acc[route.path];
+      if (!path) {
+        path = acc[route.path] = {} as Record<string, unknown>;
+      }
+      path[route.method.toLowerCase()] = routeToJsonSchema(route, options);
+      return acc;
+    }, {} as Record<string, Record<string, unknown>>);
+
+    const schema = {
+      openapi: params.openapiVersion,
+      security: params.security && [
+        params.security.reduce(
+          (acc, s) => ({ ...acc, [s.name]: s.scopes }),
+          {}
+        ),
+      ],
+      info: params.info,
+      tags: params.tags,
+      paths,
+      servers: params.servers,
+      components: {
+        securitySchemes: params.securitySchemes,
+        schemas:
+          options.type == "referenced"
+            ? toSchemaObject(
+                params.routes.flatMap(collectRefSchemasForRoute),
+                options
+              )
+            : {},
       },
+    };
+
+    // dereference schema to put everything in one big schema
+    let finalSchema = await normalizeSchema({
+      type: options.type == "flat" ? "dereference" : "bundle",
+      source: {
+        type: "schema",
+        schema,
+      },
+      target:
+        // write to output file, if specified
+        params.output.type == "file"
+          ? { type: "file", filename: params.output.filename }
+          : undefined,
+      tempDir,
     });
 
-    // prettify, export to output and return
-    const finalSchema = prettify(JSON.stringify(dereferencedSchema));
+    // print to console, if specified
     if (params.output.type == "stdout") {
       console.log(finalSchema);
-    } else if (params.output.type == "file") {
-      await fs.writeFile(params.output.filename, finalSchema);
     }
-    return finalSchema;
   });
 }
 
-const withTempFile = async <T>(fn: (filename: string) => Promise<T>) => {
+function collectRefSchemasForSchema(schema: Schema | undefined): FixedSchema[] {
+  if (schema instanceof FixedSchema) {
+    return [schema].concat(
+      collectRefSchemasForSchema(schema.getReferencedSchema())
+    );
+  } else if (schema instanceof ObjectField) {
+    return Object.values(schema._fields).flatMap(collectRefSchemasForSchema);
+  } else if (schema instanceof ArrayField) {
+    return collectRefSchemasForSchema(schema._items);
+  } else {
+    return [];
+  }
+}
+
+function collectRefSchemasForRoute(route: Route): FixedSchema[] {
+  if ("validate" in route) {
+    const schemas: (Schema | undefined)[] = [
+      route.validate?.path,
+      route.validate?.headers,
+      route.validate?.query,
+      route.validate?.body,
+      route.successResponse.schema,
+      ...(route.errorResponses?.map((r) => r.schema) || []),
+    ];
+    return schemas.flatMap(collectRefSchemasForSchema);
+  } else {
+    return [];
+  }
+}
+
+function toSchemaObject(
+  schemas: FixedSchema[],
+  options: Options
+): Record<string, FixedSchema> {
+  return schemas.reduce(
+    (acc, schema) => ({
+      ...acc,
+      ...schema.toComponent(options),
+    }),
+    {}
+  );
+}
+
+const withTempDir = async <T>(fn: (tempDir: string) => Promise<T>) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "oas-dsl"));
   try {
-    const filename = path.join(dir, "schema.json");
-    return await fn(filename);
+    return await fn(dir);
   } finally {
     // delete temp file, ignoring errors that may occur
     fs.rm(dir, { recursive: true }).catch((err) => null);
@@ -507,5 +676,53 @@ function clone<T>(t: T) {
 }
 
 const prettify = (data: string) => prettier.format(data, { parser: "json" });
+
+const toSchemaName = (label: string) =>
+  label.replace(/[^A-Za-z0-9\-\._]/gm, "_");
+
+const getFilename = (path: string) => path.substring(path.lastIndexOf("/") + 1);
+
+const normalizeSchema = async (params: {
+  tempDir: string;
+  type: "bundle" | "dereference";
+  source:
+    | {
+        type: "schema";
+        schema: Record<string, unknown>;
+      }
+    | { type: "file"; filename: string };
+  target?: { type: "file"; filename: string };
+}): Promise<string> => {
+  // build a temp file with the source schema, if needed
+  let sourceFilename: string;
+  if (params.source.type == "file") {
+    sourceFilename = params.source.filename;
+  } else {
+    sourceFilename = randomFilename({
+      dir: params.tempDir,
+      prefix: "pre-normalize",
+    });
+    await fs.writeFile(sourceFilename, JSON.stringify(params.source.schema));
+  }
+
+  // normalize the schema
+  const normalizedSchema = await $RefParser[params.type](sourceFilename, {
+    continueOnError: false,
+    parse: { json: true },
+  });
+
+  // prettify, save to target file (if needed) and return the schema
+  const finalSchema = prettify(JSON.stringify(normalizedSchema));
+  if (params.target?.type == "file") {
+    await fs.writeFile(params.target.filename, finalSchema);
+  }
+  return finalSchema;
+};
+
+/**Generate a random filename */
+const randomFilename = (params: { dir?: string; prefix: string }) => {
+  const filename = `${params.prefix}-${crypto.randomBytes(3).toString("hex")}`;
+  return params.dir ? path.join(params.dir, filename) : filename;
+};
 
 export { oas, Route, Schema };
