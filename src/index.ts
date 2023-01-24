@@ -20,6 +20,8 @@ interface RouteResponse<S> {
   statusCode: S;
   description: string;
   schema?: Schema;
+  headers?: ObjectField;
+  examples?: Record<string, { value: unknown }>;
 }
 
 type Route = DefinedRoute | ReferencedRoute;
@@ -366,6 +368,21 @@ class ObjectField extends ExtensibleSchema {
       required: requiredFields.length ? requiredFields : undefined,
     };
   }
+
+  asResponseHeaders(options: Options) {
+    const fields = this._fields;
+    const fieldNames = Object.keys(fields);
+    return fieldNames.reduce((acc, key) => {
+      const schema: any = fields[key].toJSonSchema(options);
+      return {
+        ...acc,
+        [key]: {
+          schema: { type: schema.type },
+          description: schema.description,
+        },
+      };
+    }, {});
+  }
 }
 
 class ArrayField extends ExtensibleSchema {
@@ -402,11 +419,6 @@ const oas = {
 
 const routeToJsonSchema = (route: Route, options: Options): JsonSchema => {
   if ("operationId" in route) {
-    const errorResponses = route.errorResponses?.reduce((acc, response) => ({
-      ...acc,
-      [response.statusCode]: toResponseSchema(response, options),
-    }));
-
     const pathAsTag = /\/([^\/]+)/.exec(route.path)?.[1];
     const parameters = [
       ...(route.validate?.headers?.asParameterList("header", options) || []),
@@ -454,14 +466,16 @@ const routeToJsonSchema = (route: Route, options: Options): JsonSchema => {
 
 function toResponseSchema(response: RouteResponse<any>, options: Options) {
   if (response.schema) {
-    return {
+    return ignoreUndefined({
       description: response.description,
+      headers: response.headers && response.headers.asResponseHeaders(options),
       content: {
         "application/json": {
           schema: response.schema.toJSonSchema(options),
+          examples: response.examples,
         },
       },
-    };
+    });
   } else {
     return {
       description: response.description,
