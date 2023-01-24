@@ -5,6 +5,7 @@ import prettier from "prettier";
 import $RefParser from "@apidevtools/json-schema-ref-parser";
 import crypto from "crypto";
 
+type Examples = Record<string, { value: unknown }>;
 type JsonSchema = Record<string, unknown>;
 type SecurityRequirement = { name: string; scopes: string[] };
 type Options = {
@@ -21,7 +22,7 @@ interface RouteResponse<S> {
   description: string;
   schema?: Schema;
   headers?: ObjectField;
-  examples?: Record<string, { value: unknown }>;
+  examples?: Examples;
 }
 
 type Route = DefinedRoute | ReferencedRoute;
@@ -60,11 +61,17 @@ abstract class Schema {
   protected _description?: string;
   _required?: boolean;
   _explode?: boolean;
+  _examples?: Examples;
   protected _example?: any;
   abstract toJSonSchema(options: Options): JsonSchema;
   required() {
     const that = clone(this);
     that._required = true;
+    return that;
+  }
+  examples(examples: Examples) {
+    const that = clone(this);
+    that._examples = examples;
     return that;
   }
 }
@@ -434,6 +441,7 @@ const routeToJsonSchema = (route: Route, options: Options): JsonSchema => {
         content: {
           "application/json": {
             schema: route.validate.body.toJSonSchema(options),
+            examples: route.validate.body._examples,
           },
         },
       },
