@@ -4,6 +4,7 @@ import path from "path";
 import prettier from "prettier";
 import $RefParser from "@apidevtools/json-schema-ref-parser";
 import crypto from "crypto";
+import jp from "jsonpath";
 
 type Examples = Record<string, { value: unknown }>;
 type JsonSchema = Record<string, unknown>;
@@ -561,6 +562,10 @@ async function makeSchema(
               };
         }
     >;
+    transformations?: Array<{
+      jsonPath: string;
+      fn: (currentValue: any) => any;
+    }>;
     output:
       | { type: "stdout" }
       | { type: "file"; filename: string }
@@ -633,6 +638,13 @@ async function makeSchema(
           : undefined,
       tempDir,
     });
+
+    // apply any JsonPath transformations that may have been specified
+    if (params.transformations) {
+      const obj = JSON.parse(finalSchema);
+      params.transformations.forEach((t) => jp.apply(obj, t.jsonPath, t.fn));
+      finalSchema = prettify(JSON.stringify(obj));
+    }
 
     // print to console, if specified
     if (params.output.type == "stdout") {

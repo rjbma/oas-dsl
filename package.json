@@ -3,7 +3,7 @@
   "engines": {
     "node": ">10"
   },
-  "version": "1.0.9",
+  "version": "1.0.10",
   "description": "Build OpenAPI specs with Typescript",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -18,6 +18,7 @@
   "author": "rjbma",
   "license": "ISC",
   "devDependencies": {
+    "@types/jsonpath": "^0.2.0",
     "@types/node": "^18.7.8",
     "@types/prettier": "^2.7.1",
     "nodemon": "^2.0.19",
@@ -25,6 +26,7 @@
   },
   "dependencies": {
     "json-schema-ref-parser": "^9.0.9",
+    "jsonpath": "^1.1.1",
     "prettier": "^2.8.1"
   }
 }
