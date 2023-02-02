@@ -447,6 +447,7 @@ const routeToJsonSchema = (route: Route, options: Options): JsonSchema => {
         },
       },
       tags: route.tags || (pathAsTag ? [pathAsTag] : undefined),
+      security: route.security && securityToJsonSchema(route.security),
       responses: {
         [route.successResponse.statusCode]: toResponseSchema(
           route.successResponse,
@@ -602,12 +603,7 @@ async function makeSchema(
 
     const schema = {
       openapi: params.openapiVersion,
-      security: params.security && [
-        params.security.reduce(
-          (acc, s) => ({ ...acc, [s.name]: s.scopes }),
-          {}
-        ),
-      ],
+      security: params.security && securityToJsonSchema(params.security),
       info: params.info,
       tags: params.tags,
       paths,
@@ -695,6 +691,10 @@ function toSchemaObject(
     {}
   );
 }
+
+const securityToJsonSchema = (reqs: SecurityRequirement[]) => [
+  reqs.reduce((acc, s) => ({ ...acc, [s.name]: s.scopes }), {}),
+];
 
 const withTempDir = async <T>(fn: (tempDir: string) => Promise<T>) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "oas-dsl"));
