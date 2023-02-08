@@ -185,7 +185,18 @@ class ReferenceSchema extends Schema {
    * This should be done *after* the schema is fully defined, so that this can be done
    * for all possible references.
    */
-  static async dereferenceExternalSchemas(tempDir: string): Promise<void> {
+  static async dereferenceExternalSchemas(
+    routes: Route[],
+    tempDir: string
+  ): Promise<void> {
+    // files in ReferencedRoutes
+    routes.forEach((route) => {
+      if ("ref" in route) {
+        ReferenceSchema.externalFiles[route.ref.file.toString()] = "";
+      }
+    });
+
+    // files in ReferenceSchemas
     await Promise.all(
       Object.keys(ReferenceSchema.externalFiles).map(
         async (externalFilePath, i) => {
@@ -583,7 +594,7 @@ async function makeSchema(
       }
     }
 
-    await ReferenceSchema.dereferenceExternalSchemas(tempDir);
+    await ReferenceSchema.dereferenceExternalSchemas(params.routes, tempDir);
 
     const sortedRoutes = [...params.routes];
     sortedRoutes.sort(
