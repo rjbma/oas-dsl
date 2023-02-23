@@ -6,7 +6,7 @@ import $RefParser from "@apidevtools/json-schema-ref-parser";
 import crypto from "crypto";
 import jp from "jsonpath";
 
-type Examples = Record<string, { value: unknown }>;
+type Examples = Record<string, { description?: string; value: unknown }>;
 type JsonSchema = Record<string, unknown>;
 type SecurityRequirement = { name: string; scopes: string[] };
 type Options = {
