@@ -61,6 +61,7 @@ interface DefinedRoute {
 abstract class Schema {
   protected _description?: string;
   _required?: boolean;
+  _deprecated?: boolean;
   _explode?: boolean;
   _examples?: Examples;
   protected _example?: any;
@@ -68,6 +69,11 @@ abstract class Schema {
   required() {
     const that = clone(this);
     that._required = true;
+    return that;
+  }
+  deprecated() {
+    const that = clone(this);
+    that._deprecated = true;
     return that;
   }
   examples(examples: Examples) {
@@ -105,6 +111,7 @@ abstract class ExtensibleSchema extends Schema {
     return {
       description: this._description,
       example: this._example,
+      deprecated: this._deprecated,
     };
   }
   abstract ownFields(options: Options): { type: string } & Record<string, any>;
@@ -126,6 +133,7 @@ class FixedSchema extends Schema {
     this._schema = schema;
     this._label = toSchemaName(label);
     this._required = schema._required;
+    this._deprecated = schema._deprecated;
     this._explode = schema._explode;
     FixedSchema.registeredFixedSchemas.push(this._label);
   }

@@ -3,7 +3,7 @@
   "engines": {
     "node": ">10"
   },
-  "version": "1.0.13",
+  "version": "1.0.14",
   "description": "Build OpenAPI specs with Typescript",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
