@@ -40,6 +40,7 @@ interface DefinedRoute {
   operationId: string;
   description: string;
   notes?: string;
+  deprecated?: boolean;
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   path: string;
   tags?: string[];
@@ -456,6 +457,7 @@ const routeToJsonSchema = (route: Route, options: Options): JsonSchema => {
       summary: route.description,
       operationId: route.operationId,
       description: route.notes,
+      deprecated: route.deprecated,
       parameters: parameters.length ? parameters : undefined,
       requestBody: route.validate?.body && {
         content: {
@@ -524,7 +526,7 @@ async function makeSchema(
           string,
           { default: string; description?: string; enum?: string[] }
         >;
-      }
+      },
     ];
     tags: string[];
     routes: Route[];
@@ -611,14 +613,17 @@ async function makeSchema(
         (b.order == undefined ? 10000 : b.order)
     );
 
-    const paths = sortedRoutes.reduce((acc, route) => {
-      let path = acc[route.path];
-      if (!path) {
-        path = acc[route.path] = {} as Record<string, unknown>;
-      }
-      path[route.method.toLowerCase()] = routeToJsonSchema(route, options);
-      return acc;
-    }, {} as Record<string, Record<string, unknown>>);
+    const paths = sortedRoutes.reduce(
+      (acc, route) => {
+        let path = acc[route.path];
+        if (!path) {
+          path = acc[route.path] = {} as Record<string, unknown>;
+        }
+        path[route.method.toLowerCase()] = routeToJsonSchema(route, options);
+        return acc;
+      },
+      {} as Record<string, Record<string, unknown>>
+    );
 
     const schema = {
       openapi: params.openapiVersion,
@@ -658,7 +663,7 @@ async function makeSchema(
     if (params.transformations) {
       const obj = JSON.parse(finalSchema);
       params.transformations.forEach((t) => jp.apply(obj, t.jsonPath, t.fn));
-      finalSchema = prettify(JSON.stringify(obj));
+      finalSchema = await prettify(JSON.stringify(obj));
     }
 
     // print to console, if specified
@@ -774,7 +779,7 @@ const normalizeSchema = async (params: {
   });
 
   // prettify, save to target file (if needed) and return the schema
-  const finalSchema = prettify(JSON.stringify(normalizedSchema));
+  const finalSchema = await prettify(JSON.stringify(normalizedSchema));
   if (params.target?.type == "file") {
     await fs.writeFile(params.target.filename, finalSchema);
   }
