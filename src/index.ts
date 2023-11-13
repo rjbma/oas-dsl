@@ -35,6 +35,7 @@ interface ReferencedRoute {
     file: string | URL;
     path: string;
   };
+  deprecated?: boolean;
 }
 interface DefinedRoute {
   operationId: string;
@@ -489,9 +490,10 @@ const routeToJsonSchema = (route: Route, options: Options): JsonSchema => {
       route.ref.file instanceof URL
         ? route.ref.file.toString()
         : route.ref.file;
-    return {
+    return ignoreUndefined({
       $ref: `${filename}#${route.ref.path}`,
-    };
+      deprecated: route.deprecated,
+    });
   }
 };
 
