@@ -342,6 +342,32 @@ class EnumField extends ExtensibleSchema {
   }
 }
 
+class OneOfSchema extends Schema {
+  _schemas: Schema[];
+  constructor(...values: Schema[]) {
+    super();
+    this._schemas = values;
+  }
+  toJSonSchema(options: Options): JsonSchema {
+    return {
+      oneOf: this._schemas.map((s) => s.toJSonSchema(options)),
+    };
+  }
+}
+
+class AnyOfSchema extends Schema {
+  _schemas: Schema[];
+  constructor(...values: Schema[]) {
+    super();
+    this._schemas = values;
+  }
+  toJSonSchema(options: Options): JsonSchema {
+    return {
+      anyOf: this._schemas.map((s) => s.toJSonSchema(options)),
+    };
+  }
+}
+
 class ObjectField extends ExtensibleSchema {
   _fields: Record<string, Schema>;
 
@@ -443,6 +469,8 @@ const oas = {
   array: () => new ArrayField(),
   ref: (params: { file: URL | string; path: string }) =>
     new ReferenceSchema(params.file, params.path),
+  oneOf: (...schemas: Schema[]) => new OneOfSchema(...schemas),
+  anyOf: (...schemas: Schema[]) => new AnyOfSchema(...schemas),
   makeSchema,
 };
 
