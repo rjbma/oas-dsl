@@ -370,10 +370,17 @@ class AnyOfSchema extends Schema {
 
 class ObjectField extends ExtensibleSchema {
   _fields: Record<string, Schema>;
+  _additionalProperties?: boolean;
 
   constructor(fields?: Record<string, Schema>) {
     super();
     this._fields = fields || {};
+  }
+
+  additionalProperties(d: boolean) {
+    const that = clone(this);
+    that._additionalProperties = d;
+    return that;
   }
 
   asParameterList(
@@ -420,6 +427,7 @@ class ObjectField extends ExtensibleSchema {
               }),
               {}
             ),
+      additionaProperties: this._additionalProperties,
       required: requiredFields.length ? requiredFields : undefined,
     };
   }
