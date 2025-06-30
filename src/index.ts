@@ -7,8 +7,15 @@ import crypto from "crypto";
 import jp from "jsonpath";
 
 type Examples = Record<string, { description?: string; value: unknown }>;
-type JsonSchema = Record<string, unknown>;
+type SchemaObject = Record<string, unknown>;
 type SecurityRequirement = { name: string; scopes: string[] };
+type MediaType =
+  | "application/json"
+  | "application/xml"
+  | "application/x-ndjson";
+type MediaTypeSchemaMap = {
+  [K in MediaType]?: Schema;
+};
 type Options = {
   /**
    * Determines the type of schema to produce:
@@ -21,7 +28,7 @@ type Options = {
 interface RouteResponse<S> {
   statusCode: S;
   description: string;
-  schema?: Schema;
+  schema?: Schema | MediaTypeSchemaMap;
   headers?: ObjectField;
   examples?: Examples;
 }
@@ -48,7 +55,7 @@ interface DefinedRoute {
   validate?: {
     path?: ObjectField;
     query?: ObjectField;
-    body?: Schema;
+    body?: Schema | MediaTypeSchemaMap;
     headers?: ObjectField;
   };
   // fell free to add more success status codes if needed
@@ -67,7 +74,7 @@ abstract class Schema {
   _explode?: boolean;
   _examples?: Examples;
   protected _example?: any;
-  abstract toJSonSchema(options: Options): JsonSchema;
+  abstract toSchema(options: Options): SchemaObject;
   required() {
     const that = clone(this);
     that._required = true;
@@ -100,7 +107,7 @@ abstract class ExtensibleSchema extends Schema {
     const that = new FixedSchema(this, d);
     return that;
   }
-  toJSonSchema(options: Options): JsonSchema {
+  toSchema(options: Options): SchemaObject {
     const { type, format, ...ownFields } = this.ownFields(options);
     return ignoreUndefined({
       type,
@@ -139,9 +146,9 @@ class FixedSchema extends Schema {
     this._explode = schema._explode;
     FixedSchema.registeredFixedSchemas.push(this._label);
   }
-  toJSonSchema(options: Options): JsonSchema {
+  toSchema(options: Options): SchemaObject {
     if (options.type == "flat") {
-      return this._schema.toJSonSchema(options);
+      return this._schema.toSchema(options);
     } else {
       return {
         $ref: `#/components/schemas/${this._label}`,
@@ -149,7 +156,7 @@ class FixedSchema extends Schema {
     }
   }
   toComponent(options: Options) {
-    return { [toSchemaName(this._label)]: this._schema.toJSonSchema(options) };
+    return { [toSchemaName(this._label)]: this._schema.toSchema(options) };
   }
   getReferencedSchema() {
     return this._schema;
@@ -233,7 +240,7 @@ class ReferenceSchema extends Schema {
     );
   }
 
-  toJSonSchema(): JsonSchema {
+  toSchema(): SchemaObject {
     const sourceFilename = this._file.toString();
     const targetFilename = ReferenceSchema.externalFiles[sourceFilename];
     if (targetFilename) {
@@ -348,9 +355,9 @@ class OneOfSchema extends Schema {
     super();
     this._schemas = values;
   }
-  toJSonSchema(options: Options): JsonSchema {
+  toSchema(options: Options): SchemaObject {
     return {
-      oneOf: this._schemas.map((s) => s.toJSonSchema(options)),
+      oneOf: this._schemas.map((s) => s.toSchema(options)),
     };
   }
 }
@@ -361,9 +368,9 @@ class AnyOfSchema extends Schema {
     super();
     this._schemas = values;
   }
-  toJSonSchema(options: Options): JsonSchema {
+  toSchema(options: Options): SchemaObject {
     return {
-      anyOf: this._schemas.map((s) => s.toJSonSchema(options)),
+      anyOf: this._schemas.map((s) => s.toSchema(options)),
     };
   }
 }
@@ -396,7 +403,7 @@ class ObjectField extends ExtensibleSchema {
           : fields[key];
       // don't include `example` in parameters, to avoid swagger-ui to fill them when trying out the API
       const { description, example, required, ...schema } =
-        fieldSchema.toJSonSchema(options);
+        fieldSchema.toSchema(options);
       return {
         description,
         name: key,
@@ -423,7 +430,7 @@ class ObjectField extends ExtensibleSchema {
           : fieldNames.reduce(
               (acc, key) => ({
                 ...acc,
-                [key]: fields[key].toJSonSchema(options),
+                [key]: fields[key].toSchema(options),
               }),
               {}
             ),
@@ -436,7 +443,7 @@ class ObjectField extends ExtensibleSchema {
     const fields = this._fields;
     const fieldNames = Object.keys(fields);
     return fieldNames.reduce((acc, key) => {
-      const schema: any = fields[key].toJSonSchema(options);
+      const schema: any = fields[key].toSchema(options);
       return {
         ...acc,
         [key]: {
@@ -462,7 +469,7 @@ class ArrayField extends ExtensibleSchema {
   ownFields(options: Options) {
     return {
       type: "array",
-      items: this._items?.toJSonSchema(options),
+      items: this._items?.toSchema(options),
     };
   }
 }
@@ -482,7 +489,7 @@ const oas = {
   makeSchema,
 };
 
-const routeToJsonSchema = (route: Route, options: Options): JsonSchema => {
+const routeToSchema = (route: Route, options: Options): SchemaObject => {
   if ("operationId" in route) {
     const pathAsTag = /\/([^\/]+)/.exec(route.path)?.[1];
     const parameters = [
@@ -490,6 +497,29 @@ const routeToJsonSchema = (route: Route, options: Options): JsonSchema => {
       ...(route.validate?.path?.asParameterList("path", options) || []),
       ...(route.validate?.query?.asParameterList("query", options) || []),
     ];
+    let content: Record<string, unknown> = {};
+    if (route.validate?.body) {
+      if (route.validate.body instanceof Schema) {
+        // Single schema for application/json media type
+        content["application/json"] = {
+          schema: route.validate.body.toSchema(options),
+          examples: route.validate.body._examples,
+        };
+      } else {
+        // Different schemas for different media types
+        for (const mediaType of Object.keys(route.validate.body)) {
+          const schema =
+            route.validate.body[mediaType as keyof typeof route.validate.body];
+          if (schema) {
+            content[mediaType] = {
+              schema: schema.toSchema(options),
+              examples: schema._examples,
+            };
+          }
+        }
+      }
+    }
+
     return ignoreUndefined({
       summary: route.description,
       operationId: route.operationId,
@@ -497,11 +527,8 @@ const routeToJsonSchema = (route: Route, options: Options): JsonSchema => {
       deprecated: route.deprecated,
       parameters: parameters.length ? parameters : undefined,
       requestBody: route.validate?.body && {
-        content: {
-          "application/json": {
-            schema: route.validate.body.toJSonSchema(options),
-            examples: route.validate.body._examples,
-          },
+        requestBody: route.validate?.body && {
+          content: content,
         },
       },
       tags: route.tags || (pathAsTag ? [pathAsTag] : undefined),
@@ -535,15 +562,32 @@ const routeToJsonSchema = (route: Route, options: Options): JsonSchema => {
 
 function toResponseSchema(response: RouteResponse<any>, options: Options) {
   if (response.schema) {
+    let content: Record<string, unknown> = {};
+
+    if (response.schema instanceof Schema) {
+      content = {
+        "application/json": {
+          schema: response.schema.toSchema(options),
+          examples: response.examples,
+        },
+      };
+    } else {
+      for (const mediaType of Object.keys(response.schema)) {
+        const schema =
+          response.schema[mediaType as keyof typeof response.schema];
+        if (schema) {
+          // Add this null check
+          content[mediaType] = {
+            schema: schema.toSchema(options),
+            examples: response.examples,
+          };
+        }
+      }
+    }
     return ignoreUndefined({
       description: response.description,
       headers: response.headers && response.headers.asResponseHeaders(options),
-      content: {
-        "application/json": {
-          schema: response.schema.toJSonSchema(options),
-          examples: response.examples,
-        },
-      },
+      content: content,
     });
   } else {
     return {
@@ -657,7 +701,7 @@ async function makeSchema(
         if (!path) {
           path = acc[route.path] = {} as Record<string, unknown>;
         }
-        path[route.method.toLowerCase()] = routeToJsonSchema(route, options);
+        path[route.method.toLowerCase()] = routeToSchema(route, options);
         return acc;
       },
       {} as Record<string, Record<string, unknown>>
@@ -711,7 +755,9 @@ async function makeSchema(
   });
 }
 
-function collectRefSchemasForSchema(schema: Schema | undefined): FixedSchema[] {
+function collectRefSchemasForSchema(
+  schema: Schema | MediaTypeSchemaMap | undefined
+): FixedSchema[] {
   if (schema instanceof FixedSchema) {
     return [schema].concat(
       collectRefSchemasForSchema(schema.getReferencedSchema())
@@ -727,7 +773,7 @@ function collectRefSchemasForSchema(schema: Schema | undefined): FixedSchema[] {
 
 function collectRefSchemasForRoute(route: Route): FixedSchema[] {
   if ("validate" in route) {
-    const schemas: (Schema | undefined)[] = [
+    const schemas: (Schema | MediaTypeSchemaMap | undefined)[] = [
       route.validate?.path,
       route.validate?.headers,
       route.validate?.query,
