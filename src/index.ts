@@ -250,6 +250,7 @@ class StringField extends ExtensibleSchema {
   _minLength?: number;
   _maxLength?: number;
   _regex?: RegExp;
+  _format: string | undefined;
 
   min(d: number) {
     const that = clone(this);
@@ -266,12 +267,18 @@ class StringField extends ExtensibleSchema {
     that._regex = d;
     return that;
   }
+  format(f: string) {
+    const that = clone(this);
+    that._format = f;
+    return that;
+  }
   ownFields() {
     return {
       type: "string",
       minLength: this._minLength,
       maxLength: this._maxLength,
       pattern: this._regex?.source,
+      format: this._format,
     };
   }
 }
