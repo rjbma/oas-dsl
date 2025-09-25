@@ -434,7 +434,7 @@ class ObjectField extends ExtensibleSchema {
               }),
               {}
             ),
-      additionaProperties: this._additionalProperties,
+      additionalProperties: this._additionalProperties,
       required: requiredFields.length ? requiredFields : undefined,
     };
   }
