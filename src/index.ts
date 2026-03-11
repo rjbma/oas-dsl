@@ -166,7 +166,7 @@ class FixedSchema extends Schema {
         ...acc,
         [s]: (acc[s] || 0) + 1,
       }),
-      {} as Record<string, number>
+      {} as Record<string, number>,
     );
     return Object.keys(schemaCount).filter((s) => schemaCount[s] > 1);
   }
@@ -197,7 +197,7 @@ class ReferenceSchema extends Schema {
    */
   static async dereferenceExternalSchemas(
     routes: Route[],
-    tempDir: string
+    tempDir: string,
   ): Promise<void> {
     // files in ReferencedRoutes
     routes.forEach((route) => {
@@ -212,7 +212,7 @@ class ReferenceSchema extends Schema {
         async (externalFilePath, i) => {
           const targetFilename = path.join(
             tempDir,
-            `spec-${i}-${getFilename(externalFilePath)}`
+            `spec-${i}-${getFilename(externalFilePath)}`,
           );
           await normalizeSchema({
             tempDir,
@@ -228,8 +228,8 @@ class ReferenceSchema extends Schema {
           });
 
           ReferenceSchema.externalFiles[externalFilePath] = targetFilename;
-        }
-      )
+        },
+      ),
     );
   }
 
@@ -392,7 +392,7 @@ class ObjectField extends ExtensibleSchema {
 
   asParameterList(
     parameterType: "path" | "query" | "header" | "cookie",
-    options: Options
+    options: Options,
   ) {
     const fields = this._fields;
     return Object.keys(fields).map((key) => {
@@ -432,7 +432,7 @@ class ObjectField extends ExtensibleSchema {
                 ...acc,
                 [key]: fields[key].toJSonSchema(options),
               }),
-              {}
+              {},
             ),
       additionalProperties: this._additionalProperties,
       required: requiredFields.length ? requiredFields : undefined,
@@ -456,10 +456,22 @@ class ObjectField extends ExtensibleSchema {
 }
 
 class ArrayField extends ExtensibleSchema {
+  _minItems?: number;
+  _maxItems?: number;
   _items: Schema | undefined;
   constructor() {
     super();
     this._explode = true;
+  }
+  min(d: number) {
+    const that = clone(this);
+    that._minItems = d;
+    return that;
+  }
+  max(d: number) {
+    const that = clone(this);
+    that._maxItems = d;
+    return that;
   }
   items(d: Schema) {
     const that = clone(this);
@@ -470,6 +482,8 @@ class ArrayField extends ExtensibleSchema {
     return {
       type: "array",
       items: this._items?.toJSonSchema(options),
+      minItems: this._minItems,
+      maxItems: this._maxItems,
     };
   }
 }
@@ -516,14 +530,14 @@ const routeToJsonSchema = (route: Route, options: Options): JsonSchema => {
       responses: {
         [route.successResponse.statusCode]: toResponseSchema(
           route.successResponse,
-          options
+          options,
         ),
         ...(route.errorResponses || []).reduce(
           (acc, response) => ({
             ...acc,
             [response.statusCode]: toResponseSchema(response, options),
           }),
-          {}
+          {},
         ),
       },
       "x-order": route.order,
@@ -638,7 +652,7 @@ async function makeSchema(
       | { type: "file"; filename: string }
       | { type: "none" };
   },
-  options: Options
+  options: Options,
 ) {
   return withTempDir(async (tempDir) => {
     // make sure there aren't any duplicate FixedSchemas
@@ -655,7 +669,7 @@ async function makeSchema(
     sortedRoutes.sort(
       (a, b) =>
         (a.order == undefined ? 10000 : a.order) -
-        (b.order == undefined ? 10000 : b.order)
+        (b.order == undefined ? 10000 : b.order),
     );
 
     const paths = sortedRoutes.reduce(
@@ -667,7 +681,7 @@ async function makeSchema(
         path[route.method.toLowerCase()] = routeToJsonSchema(route, options);
         return acc;
       },
-      {} as Record<string, Record<string, unknown>>
+      {} as Record<string, Record<string, unknown>>,
     );
 
     const schema = {
@@ -683,7 +697,7 @@ async function makeSchema(
           options.type == "referenced"
             ? toSchemaObject(
                 params.routes.flatMap(collectRefSchemasForRoute),
-                options
+                options,
               )
             : {},
       },
@@ -721,7 +735,7 @@ async function makeSchema(
 function collectRefSchemasForSchema(schema: Schema | undefined): FixedSchema[] {
   if (schema instanceof FixedSchema) {
     return [schema].concat(
-      collectRefSchemasForSchema(schema.getReferencedSchema())
+      collectRefSchemasForSchema(schema.getReferencedSchema()),
     );
   } else if (schema instanceof ObjectField) {
     return Object.values(schema._fields).flatMap(collectRefSchemasForSchema);
@@ -750,14 +764,14 @@ function collectRefSchemasForRoute(route: Route): FixedSchema[] {
 
 function toSchemaObject(
   schemas: FixedSchema[],
-  options: Options
+  options: Options,
 ): Record<string, FixedSchema> {
   return schemas.reduce(
     (acc, schema) => ({
       ...acc,
       ...schema.toComponent(options),
     }),
-    {}
+    {},
   );
 }
 
@@ -779,7 +793,7 @@ const ignoreUndefined = (filters: Record<string, any>) =>
   Object.keys(filters).reduce(
     (acc, key) =>
       filters[key] === undefined ? acc : { ...acc, [key]: filters[key] },
-    {}
+    {},
   );
 
 function clone<T>(t: T) {
