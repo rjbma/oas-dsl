@@ -4,7 +4,7 @@ import path from "path";
 import prettier from "prettier";
 import $RefParser from "@apidevtools/json-schema-ref-parser";
 import crypto from "crypto";
-import jp from "jsonpath";
+import { JSONPath } from "jsonpath-plus";
 
 type Examples = Record<string, { description?: string; value: unknown }>;
 type JsonSchema = Record<string, unknown>;
@@ -721,7 +721,15 @@ async function makeSchema(
     // apply any JsonPath transformations that may have been specified
     if (params.transformations) {
       const obj = JSON.parse(finalSchema);
-      params.transformations.forEach((t) => jp.apply(obj, t.jsonPath, t.fn));
+      params.transformations.forEach((t) => {
+        JSONPath({
+          path: t.jsonPath,
+          json: obj,
+          callback: (value, _type, res) => {
+            res.parent[res.parentProperty] = t.fn(value);
+          },
+        });
+      });
       finalSchema = await prettify(JSON.stringify(obj));
     }
 
