@@ -170,6 +170,9 @@ class FixedSchema extends Schema {
     );
     return Object.keys(schemaCount).filter((s) => schemaCount[s] > 1);
   }
+  static resetRegistry() {
+    FixedSchema.registeredFixedSchemas = [];
+  }
 }
 
 /**
@@ -737,6 +740,8 @@ async function makeSchema(
     if (params.output.type == "stdout") {
       console.log(finalSchema);
     }
+
+    return finalSchema;
   });
 }
 
@@ -859,4 +864,4 @@ const randomFilename = (params: { dir?: string; prefix: string }) => {
   return params.dir ? path.join(params.dir, filename) : filename;
 };
 
-export { oas, Route, Schema };
+export { oas, Route, Schema, FixedSchema };
