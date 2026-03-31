@@ -12,7 +12,8 @@ type SecurityRequirement = { name: string; scopes: string[] };
 type MediaType =
   | "application/json"
   | "application/xml"
-  | "application/x-ndjson";
+  | "application/x-ndjson"
+  | "text/plain";
 type MediaTypeSchemaMap = {
   [K in MediaType]?: Schema;
 };
@@ -528,16 +529,16 @@ const routeToSchema = (route: Route, options: Options): SchemaObject => {
         };
       } else {
         // Different schemas for different media types
-        for (const mediaType of Object.keys(route.validate.body)) {
-          const schema =
-            route.validate.body[mediaType as keyof typeof route.validate.body];
+        const bodyMap = route.validate.body as MediaTypeSchemaMap;
+        Object.keys(bodyMap).forEach((mediaType) => {
+          const schema = bodyMap[mediaType as MediaType];
           if (schema) {
             content[mediaType] = {
               schema: schema.toSchema(options),
               examples: schema._examples,
             };
           }
-        }
+        });
       }
     }
 
@@ -548,9 +549,7 @@ const routeToSchema = (route: Route, options: Options): SchemaObject => {
       deprecated: route.deprecated,
       parameters: parameters.length ? parameters : undefined,
       requestBody: route.validate?.body && {
-        requestBody: route.validate?.body && {
-          content: content,
-        },
+        content: content,
       },
       tags: route.tags || (pathAsTag ? [pathAsTag] : undefined),
       security: route.security && securityToJsonSchema(route.security),
@@ -593,17 +592,16 @@ function toResponseSchema(response: RouteResponse<any>, options: Options) {
         },
       };
     } else {
-      for (const mediaType of Object.keys(response.schema)) {
-        const schema =
-          response.schema[mediaType as keyof typeof response.schema];
+      const schemaMap = response.schema as MediaTypeSchemaMap;
+      Object.keys(schemaMap).forEach((mediaType) => {
+        const schema = schemaMap[mediaType as MediaType];
         if (schema) {
-          // Add this null check
           content[mediaType] = {
             schema: schema.toSchema(options),
             examples: response.examples,
           };
         }
-      }
+      });
     }
     return ignoreUndefined({
       description: response.description,
@@ -802,7 +800,7 @@ function collectRefSchemasForSchema(
 
 function collectRefSchemasForRoute(route: Route): FixedSchema[] {
   if ("validate" in route) {
-    const schemas: (Schema | MediaTypeSchemaMap | undefined)[] = [
+    const schemas = [
       route.validate?.path,
       route.validate?.headers,
       route.validate?.query,
