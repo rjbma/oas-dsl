@@ -13,7 +13,8 @@ type MediaType =
   | "application/json"
   | "application/xml"
   | "application/x-ndjson"
-  | "text/plain";
+  | "text/plain"
+  | (string & {});
 type MediaTypeSchemaMap = {
   [K in MediaType]?: Schema;
 };
