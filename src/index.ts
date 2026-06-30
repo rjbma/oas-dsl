@@ -361,16 +361,17 @@ class EnumField extends ExtensibleSchema {
   }
 }
 
-class OneOfSchema extends Schema {
+class OneOfSchema extends ExtensibleSchema {
   _schemas: Schema[];
   constructor(...values: Schema[]) {
     super();
     this._schemas = values;
   }
-  toSchema(options: Options): SchemaObject {
+  ownFields(options: Options) {
+    // oneOf schemas don't need the "type" field, so we need to type cast
     return {
       oneOf: this._schemas.map((s) => s.toSchema(options)),
-    };
+    } as unknown as { type: string } & Record<string, any>;
   }
 }
 
