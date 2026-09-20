@@ -392,9 +392,9 @@ class ObjectField extends ExtensibleSchema {
   _fields: Record<string, Schema>;
   _additionalProperties?: boolean;
 
-  constructor(fields?: Record<string, Schema>) {
+  constructor(fields?: Record<string, Schema | undefined>) {
     super();
-    this._fields = fields || {};
+    this._fields = ignoreUndefined(fields || {});
   }
 
   additionalProperties(d: boolean) {
@@ -507,7 +507,8 @@ const oas = {
   date: () => new DateField(),
   number: () => new NumberField(),
   allow: (...values: string[]) => new EnumField(...values),
-  object: (fields?: Record<string, Schema>) => new ObjectField(fields),
+  object: (fields?: Record<string, Schema | undefined>) =>
+    new ObjectField(fields),
   array: () => new ArrayField(),
   ref: (params: { file: URL | string; path: string }) =>
     new ReferenceSchema(params.file, params.path),
